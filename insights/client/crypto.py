@@ -64,9 +64,8 @@ class GPGCommand(object):
     def _setup(self):
         """Prepare GPG environment.
 
-        Returns (bool):
-            `True` if public GPG keys were imported into temporary environment,
-            `False` if there was an error.
+        Raises:
+            RuntimeError: The GPG key could not be imported.
         """
         self._home = tempfile.mkdtemp()
 
@@ -77,9 +76,7 @@ class GPGCommand(object):
                 logger.debug("failed to import key '{key}': {result}".format(
                     key=key, result=result
                 ))
-                return False
-
-        return True
+                raise RuntimeError("could not import GPG key '{key}': {result}".format(key=key, result=result))
 
     def _cleanup(self):
         """Clean up GPG environment."""
@@ -151,12 +148,13 @@ class GPGCommand(object):
         Returns (CommandResult): The result of the shell command.
         """
         try:
-            ok = self._setup()
-            if not ok:
-                return
+            self._setup()
 
             logger.debug("running gpg in the temporary environment")
             return self._run(self.command)
+        except RuntimeError:
+            logger.exception("could not evaluate the GPG command")
+            raise
         finally:
             self._cleanup()
 
@@ -171,7 +169,8 @@ def verify_gpg_signed_file(file, signature, keys):
         keys (list(str)):
             List of paths to GPG public keys on the filesystem to check against.
 
-    Returns (CommandResult): Evaluated GPG command.
+    Returns:
+         CommandResult: Evaluated GPG command.
     """
     if not os.path.isfile(file):
         logger.debug(
@@ -204,3 +203,25 @@ def verify_gpg_signed_file(file, signature, keys):
         logger.debug("signature verification of '{file}' failed".format(file=file))
 
     return result
+
+
+def verify_gpg_signed_bytes(content, signature, keys):
+    """Verify a content that was signed using GPG.
+
+    Parameters:
+        content (bytes): The signed bytes.
+        signature (bytes): The signature.
+        keys (list(str)):
+            List of paths to GPG public keys on the filesystem to check against.
+
+    Returns:
+        CommandResult: Evaluated GPG command.
+    """
+    content_file = tempfile.NamedTemporaryFile()
+    with open(content_file, "wb") as f:
+        f.write(content)
+    signature_file = tempfile.NamedTemporaryFile()
+    with open(signature_file, "wb") as f:
+        f.write(signature)
+
+    return verify_gpg_signed_file(content_file.name, signature_file.name, keys)

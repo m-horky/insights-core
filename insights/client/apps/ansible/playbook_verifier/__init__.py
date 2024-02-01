@@ -2,19 +2,18 @@ import os
 import sys
 import copy
 import base64
-import tempfile
 import pkgutil
 import hashlib
 from logging import getLogger
 
 import six
 
+from insights.client import crypto
+
 import insights.client.apps.ansible
-from insights.client.apps.ansible.playbook_verifier.contrib import gnupg
 from insights.client.apps.ansible.playbook_verifier.contrib.ruamel_yaml.ruamel import yaml
 from insights.client.apps.ansible.playbook_verifier.contrib.ruamel_yaml.ruamel.yaml.comments import CommentedMap, CommentedSeq
 from insights.client.apps.ansible.playbook_verifier.contrib.ruamel_yaml.ruamel.yaml.scalarint import ScalarInt
-from insights.client.constants import InsightsConstants as constants
 
 __all__ = ("read_playbook_yaml_from_stdin", "verify", "PlaybookVerificationError")
 
@@ -135,25 +134,6 @@ def hash_playbook_snippet(snippet):
     return sha.digest()
 
 
-def get_public_key(gpg):
-    """Import public GPG key.
-
-    :param gpg: Path to the GPG key
-    :type gpg: gnupg.GPG
-
-    :returns: Import results
-    """
-    if not PUBLIC_KEY_PATH:
-        raise PlaybookVerificationError(message="PUBLIC KEY IMPORT ERROR: Public key file not found")
-
-    public_key = PUBLIC_KEY_PATH
-    import_results = gpg.import_keys(public_key)
-    if import_results.count < 1:
-        raise PlaybookVerificationError(message="PUBLIC KEY NOT IMPORTED: Public key import failed")
-
-    return import_results
-
-
 def exclude_dynamic_elements(snippet):
     """Remove dynamic elements from the Ansible playbook snippet.
 
@@ -211,22 +191,14 @@ def execute_verification(snippet, encoded_signature):
     :type encoded_signature: str
 
     :returns: Result of the GPG verification and a hash of the snippet.
-    :rtype: Tuple[..., bytes]
+    :rtype: Tuple[crypto.GPGCommandResult, bytes]
     """
-    gpg = gnupg.GPG(gnupghome=constants.insights_core_lib_dir)
-    snippet_hash = hash_playbook_snippet(snippet)
-    decoded_signature = base64.b64decode(encoded_signature)
+    signature = base64.b64decode(encoded_signature)  # type: bytes
+    snippet_hash = hash_playbook_snippet(snippet)  # type: bytes
 
-    # load public key
-    get_public_key(gpg)
-
-    fd, fn = tempfile.mkstemp()
-    os.write(fd, decoded_signature)
-    os.close(fd)
-
-    result = gpg.verify_data(fn, snippet_hash)
-    os.unlink(fn)
-
+    result = crypto.verify_gpg_signed_bytes(
+        content=snippet_hash, signature=signature, keys=[PUBLIC_KEY_PATH],
+    )  # type: crypto.GPGCommandResult
     return result, snippet_hash
 
 
@@ -237,7 +209,7 @@ def verify_playbook_snippet(snippet):
     :type snippet: dict
 
     :returns: Result of the GPG verification and a hash of the snippet.
-    :rtype: Tuple[..., bytes]
+    :rtype: Tuple[crypto.GPGCommandResult, bytes]
     """
     if "vars" not in snippet:
         raise PlaybookVerificationError("The playbook snippet doesn't have a section 'vars'.")
@@ -274,9 +246,9 @@ def get_playbook_snippet_revocation_list():
     except Exception:
         raise PlaybookVerificationError("Could not load snippet revocation list.")
 
-    verified, snippet_hash = verify_playbook_snippet(revoked_playbooks)
+    verified, _ = verify_playbook_snippet(revoked_playbooks)  # type: crypto.GPGCommandResult, bytes
 
-    if not verified:
+    if not verified.ok:
         raise PlaybookVerificationError("List of revocation signatures is invalid.")
 
     revocation_list = revoked_playbooks.get('revoked_playbooks', [])  # type: dict[str, str]
@@ -303,7 +275,7 @@ def verify(playbook):
 
     for snippet in playbook:
         name = snippet.get('name', 'NAME UNAVAILABLE')
-        verified, snippet_hash = verify_playbook_snippet(snippet)
+        verified, snippet_hash = verify_playbook_snippet(snippet)  # type: crypto.GPGCommandResult, bytes
 
         if not verified:
             raise PlaybookVerificationError(message="Template '{0}' has invalid signature".format(name))
