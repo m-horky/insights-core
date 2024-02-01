@@ -1,31 +1,26 @@
 import os
 import sys
-from insights.client.constants import InsightsConstants as constants
-from insights.client.apps.ansible.playbook_verifier import verify, load_playbook_yaml, PlaybookVerificationError
 
-skipVerify = False
-
-
-def read_playbook():
-    """
-    Read in the stringified playbook yaml from stdin
-    """
-    unverified_playbook = ''
-    for line in sys.stdin:
-        unverified_playbook += line
-
-    return unverified_playbook
+from insights.client.constants import InsightsConstants
+from insights.client.apps.ansible.playbook_verifier import read_playbook_yaml_from_stdin, verify
+from insights.client.apps.ansible.playbook_verifier import PlaybookVerificationError
 
 
-if os.environ.get('SKIP_VERIFY'):
-    skipVerify = True
+def main():
+    playbook = read_playbook_yaml_from_stdin()  # type: dict
 
-try:
-    playbook = read_playbook()
-    playbook_yaml = load_playbook_yaml(playbook)
-    verified_playbook = verify(playbook_yaml, skipVerify)
-except PlaybookVerificationError as err:
-    sys.stderr.write(err.message)
-    sys.exit(constants.sig_kill_bad)
+    if os.environ.get("SKIP_VERIFY") is not None:
+        print(playbook)
+        sys.exit(0)
 
-print(playbook)
+    try:
+        verified_playbook = verify(playbook)
+    except PlaybookVerificationError as exc:
+        sys.stderr.write(exc.message)
+        sys.exit(InsightsConstants.sig_kill_bad)
+
+    print(verified_playbook)
+
+
+if __name__ == "__main__":
+    main()
