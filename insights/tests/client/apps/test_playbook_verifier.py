@@ -6,7 +6,7 @@ from pytest import raises
 
 # don't even bother on 2.6
 if sys.version_info >= (2, 7):
-    from insights.client.apps.ansible.playbook_verifier import verify, PlaybookVerificationError, getRevocationList, normalizeSnippet, loadPlaybookYaml  # noqa
+    from insights.client.apps.ansible.playbook_verifier import verify, PlaybookVerificationError, get_playbook_snippet_revocation_list, normalize_snippet, load_playbook_yaml  # noqa
 
 
 @pytest.mark.skipif(sys.version_info < (2, 7), reason='Playbook verifier must be run on python 2.7 or above')
@@ -15,7 +15,7 @@ def test_vars_not_found_error():
     fake_playbook = [{'name': "test playbook"}]
 
     with raises(PlaybookVerificationError) as error:
-        verify(fake_playbook, skipVerify=False)
+        verify(fake_playbook, skip_verify=False)
     assert vars_error in str(error.value)
 
 
@@ -25,7 +25,7 @@ def test_empty_vars_error():
     fake_playbook = [{'name': "test playbook", 'vars': None}]
 
     with raises(PlaybookVerificationError) as error:
-        verify(fake_playbook, skipVerify=False)
+        verify(fake_playbook, skip_verify=False)
     assert sig_error in str(error.value)
 
 
@@ -35,7 +35,7 @@ def test_signature_not_found_error():
     fake_playbook = [{'name': "test playbook", 'vars': {}}]
 
     with raises(PlaybookVerificationError) as error:
-        verify(fake_playbook, skipVerify=False)
+        verify(fake_playbook, skip_verify=False)
     assert sig_error in str(error.value)
 
 
@@ -52,7 +52,7 @@ def test_key_not_imported():
     }]
 
     with raises(PlaybookVerificationError) as error:
-        verify(fake_playbook, skipVerify=False)
+        verify(fake_playbook, skip_verify=False)
     assert key_error in str(error.value)
 
 
@@ -69,7 +69,7 @@ def test_key_import_error():
     }]
 
     with raises(PlaybookVerificationError) as error:
-        verify(fake_playbook, skipVerify=False)
+        verify(fake_playbook, skip_verify=False)
     assert key_error in str(error.value)
 
 
@@ -87,7 +87,7 @@ def test_playbook_verification_error(call_1, call_2):
     }]
 
     with raises(PlaybookVerificationError) as error:
-        verify(fake_playbook, skipVerify=False)
+        verify(fake_playbook, skip_verify=False)
     assert key_error in str(error.value)
 
 
@@ -103,7 +103,7 @@ def test_playbook_verification_success(mock_method):
         }
     }]
 
-    result = verify(fake_playbook, skipVerify=False)
+    result = verify(fake_playbook, skip_verify=False)
     assert result == fake_playbook
 
 
@@ -114,7 +114,7 @@ def test_revocation_list_not_found(mock_method):
     load_error = 'VERIFICATION FAILED: Error loading revocation list'
 
     with raises(PlaybookVerificationError) as error:
-        getRevocationList()
+        get_playbook_snippet_revocation_list()
 
     assert load_error in str(error.value)
 
@@ -126,7 +126,7 @@ def test_revocation_list_signature_invalid(mock_method):
     load_error = 'VERIFICATION FAILED: Revocation list signature invalid'
 
     with raises(PlaybookVerificationError) as error:
-        getRevocationList()
+        get_playbook_snippet_revocation_list()
 
     assert load_error in str(error.value)
 
@@ -144,7 +144,7 @@ def test_revocation_list_empty(call_1, call_2):
         }
     }]
 
-    result = verify(fake_playbook, skipVerify=False)
+    result = verify(fake_playbook, skip_verify=False)
     assert result == fake_playbook
 
 
@@ -164,7 +164,7 @@ def test_revoked_playbook(call_1, call_2):
     }]
 
     with raises(PlaybookVerificationError) as error:
-        verify(fake_playbook, skipVerify=False)
+        verify(fake_playbook, skip_verify=False)
 
     assert revoked_error in str(error.value)
 
@@ -176,7 +176,7 @@ def test_normalize_snippet():
     - '"pam" in ansible_facts.packages'
     - result_pam_file_present.stat.exists'''
 
-    snippet = loadPlaybookYaml(playbook)
+    snippet = load_playbook_yaml(playbook)
 
     want = {
         'task': {
@@ -187,4 +187,4 @@ def test_normalize_snippet():
         }
     }
 
-    assert normalizeSnippet(snippet) == want
+    assert normalize_snippet(snippet) == want
