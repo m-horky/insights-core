@@ -1,25 +1,23 @@
-import os
-import six
-import copy
 import base64
-import tempfile
-import pkgutil
+import copy
 import hashlib
+import logging
+import os
+import pkgutil
+import sys
+import tempfile
+
+import six
+
 import insights.client.apps.ansible
-from logging import getLogger
 from insights.client.apps.ansible.playbook_verifier.contrib import gnupg
 from insights.client.apps.ansible.playbook_verifier.contrib.ruamel_yaml.ruamel import yaml
 from insights.client.apps.ansible.playbook_verifier.contrib.ruamel_yaml.ruamel.yaml.comments import CommentedMap, CommentedSeq
 from insights.client.apps.ansible.playbook_verifier.contrib.ruamel_yaml.ruamel.yaml.scalarint import ScalarInt
 from insights.client.constants import InsightsConstants as constants
 
+
 __all__ = ("load_playbook_yaml", "verify", "PlaybookVerificationError")
-
-SIGKEY = 'insights_signature'
-PUBLIC_KEY_PATH = pkgutil.get_data(insights.client.apps.ansible.__name__, 'playbook_verifier/public.gpg')    # Update this when we have the key generated
-EXCLUDABLE_VARIABLES = ['hosts', 'vars']
-
-logger = getLogger(__name__)
 
 yaml = yaml.YAML(typ='rt')
 yaml.indent(mapping=2, sequence=4, offset=2)
@@ -27,17 +25,17 @@ yaml.default_flow_style = False
 yaml.preserve_quotes = True
 yaml.width = 200
 
+PLAYBOOK_SIGNATURE_LABEL = 'insights_signature'
+PLAYBOOK_DYNAMIC_LABELS = ['hosts', 'vars']
+
+PUBLIC_KEY_PATH = pkgutil.get_data(insights.client.apps.ansible.__name__, 'playbook_verifier/public.gpg')
+
+logger = logging.getLogger(__name__)
+
 
 class PlaybookVerificationError(Exception):
-    """
-    Exception raised when playbook verification fails
-
-    Attributes:
-        playbook -- stringified playbook yaml from stdin
-        message -- explanation of why verification failed
-    """
-
-    def __init__(self, message="PLAYBOOK VALIDATION FAILED"):
+    """Exception raised when playbook verification fails."""
+    def __init__(self, message="Could not verify Ansible playbook"):
         self.message = message
         super(PlaybookVerificationError, self).__init__(self.message)
 
@@ -45,12 +43,78 @@ class PlaybookVerificationError(Exception):
         return self.message
 
 
-def decodeSignature(encodedSignature):
+def load_playbook_yaml(playbook):
+    """Parse a string into a dictionary.
+
+    :param playbook: The Ansible playbook
+    :type playbook: str
+
+    :returns: The playbook dictionary
+    :rtype: dict
+
+    :raises PlaybookVerificationError: The input is empty or corrupted.
+    """
+    if not playbook:
+        raise PlaybookVerificationError("Cannot load a playbook from an empty input.")
+
     try:
-        decodedSignature = base64.b64decode(encodedSignature)
-        return decodedSignature
-    except:
-        raise PlaybookVerificationError(message='VERIFICATION FAILED: Error Decoding Signature')
+        return yaml.load(playbook)
+    except Exception:
+        raise PlaybookVerificationError("Could not load the playbook.")
+
+
+def read_playbook_yaml_from_stdin():
+    """Read the Ansible playbook source from stdin.
+
+    :returns: The parsed playbook.
+    :rtype: dict
+    """
+    playbook = ""
+    for line in sys.stdin:
+        playbook += line
+    return load_playbook_yaml(playbook)
+
+
+def normalize_snippet(snippet):
+    """In Python 2, get rid of any default unicode values.
+
+    :param snippet: The (part of) Ansible playbook.
+    :type snippet: dict | yaml.comments.CommentedMap
+
+    :returns: Snippet with any Unicode text converted to ASCII.
+    :rtype: CommentedMap
+    """
+    result = CommentedMap()
+    for key, value in snippet.iteritems():
+        if isinstance(value, CommentedMap):
+            result[key] = CommentedMap(normalize_snippet(value))
+            continue
+
+        if isinstance(value, CommentedSeq):
+            new_sequence = CommentedSeq()
+            for item in value:
+                if isinstance(item, six.text_type):
+                    new_sequence.append(item.encode('ascii', 'ignore'))
+                    continue
+                if isinstance(item, CommentedMap):
+                    new_sequence.append(normalize_snippet(item))
+                    continue
+                new_sequence.append(item)
+
+            result[key] = new_sequence
+            continue
+
+        if isinstance(value, six.text_type):
+            result[key] = value.encode('ascii', 'ignore')
+            continue
+
+        if isinstance(value, ScalarInt):
+            result[key] = int(value)
+            continue
+
+        result[key] = value
+
+    return result
 
 
 def hash_playbook_snippet(snippet):
@@ -100,29 +164,44 @@ def exclude_dynamic_elements(snippet):
 
     :returns: New playbook dictionary without the unwanted values.
     :rtype: dict
-    """
-    if 'insights_signature_exclude' not in snippet['vars']:
-        raise PlaybookVerificationError(message='EXCLUDE MISSING: the insights_signature_exclude var does not exist.')
 
-    exclusions = snippet['vars']['insights_signature_exclude'].split(',')
+    :raises PlaybookVerificationError:
+    """
+    if 'insights_signature_exclude' not in snippet.get('vars', {}):
+        raise PlaybookVerificationError(
+            "The playbook snippet does not have the key 'vars/insights_signature_exclude', "
+            "dynamic exclusion cannot be performed."
+        )
+
+    exclusions = snippet['vars']['insights_signature_exclude'].split(',')  # type: list[str]
+    result = copy.deepcopy(snippet)  # type: dict[str, ...]
 
     for element in exclusions:
-        element = element.split('/')
+        elements = [string for string in element.split("/") if string != '']  # type: list[str]
 
-        # remove empty strings
-        element = [string for string in element if string != '']
-
-        if len(element) == 1 and element[0] in EXCLUDABLE_VARIABLES and element[0] in snippet.keys():
-            del snippet[element[0]]
-        elif len(element) == 2 and element[0] in EXCLUDABLE_VARIABLES:
+        if len(elements) == 1 and elements[0] in PLAYBOOK_DYNAMIC_LABELS:
             try:
-                del snippet[element[0]][element[1]]
-            except:
-                raise PlaybookVerificationError(message='INVALID FIELD: the variable {0} defined in insights_signature_exclude does not exist.'.format(element))
-        else:
-            raise PlaybookVerificationError(message='INVALID EXCLUSION: the variable {0} is not a valid exclusion.'.format(element))
+                del result[elements[0]]
+            except Exception:
+                raise PlaybookVerificationError(
+                    "Dynamic key '{key}' does not exist and cannot be excluded.".format(key=element)
+                )
+            continue
 
-    return snippet
+        if len(elements) == 2 and elements[0] in PLAYBOOK_DYNAMIC_LABELS:
+            try:
+                del result[elements[0]][elements[1]]
+            except Exception:
+                raise PlaybookVerificationError(
+                    "Dynamic key '{key}' does not exist and cannot be excluded.".format(key=element)
+                )
+            continue
+
+        raise PlaybookVerificationError(
+            "Dynamic key '{key}' cannot be excluded from verification.".format(key=element)
+        )
+
+    return result
 
 
 def execute_verification(snippet, encoded_signature):
@@ -160,21 +239,17 @@ def verify_playbook_snippet(snippet):
     :type snippet: dict
 
     :returns: Result of the GPG verification and a hash of the snippet.
-    :rtype: Tuple[crypto.GPGCommandResult, bytes]
+    :rtype: Tuple[..., bytes]
     """
-    if 'vars' not in snippet.keys():
-        raise PlaybookVerificationError(message='VERIFICATION FAILED: Vars field not found')
-    elif snippet['vars'] is None:
-        raise PlaybookVerificationError(message='VERIFICATION FAILED: Empty vars field')
-    elif SIGKEY not in snippet['vars']:
-        raise PlaybookVerificationError(message='VERIFICATION FAILED: Signature not found')
+    if "vars" not in snippet:
+        raise PlaybookVerificationError("The playbook snippet doesn't have a section 'vars'.")
+    if snippet.get("vars", {}).get(PLAYBOOK_SIGNATURE_LABEL, None) is None:
+        raise PlaybookVerificationError("The playbook snippet doesn't contain the Insights signature.")
 
-    encoded_signature = snippet['vars'][SIGKEY]
-    snippet_copy = copy.deepcopy(snippet)
+    cleaned_snippet = exclude_dynamic_elements(snippet)  # type: dict
+    encoded_signature = snippet["vars"][PLAYBOOK_SIGNATURE_LABEL]  # type: str
 
-    snippet_copy = exclude_dynamic_elements(snippet_copy)
-
-    return execute_verification(snippet_copy, encoded_signature)
+    return execute_verification(cleaned_snippet, encoded_signature)
 
 
 def get_playbook_snippet_revocation_list():
@@ -185,106 +260,58 @@ def get_playbook_snippet_revocation_list():
     :rtype: dict[str, str]
     """
     try:
-        # Import revoked list yaml.  The yaml is structured as a list of lists, so we can reuse the playbook signing and
-        # verification code.  There will only ever be one list, so we just grab the first element...
-        revoked_playbooks = yaml.load(pkgutil.get_data('insights', 'revoked_playbooks.yaml'))[0]
-
+        # We know the structure of the YAML will stay like this:
+        # > - name: revocation list
+        # >   timestamp: ...
+        # >   vars:
+        # >     insights_signature_exclude: ...
+        # >     insights_signature: !!binary | ...
+        # >   revoked_playbooks:
+        # >     - name: ...
+        # >       hash: ...
+        # >     - name: ...
+        # >       hash: ...
+        # There will never be more than one top-level object, we can safely do [0].
+        revoked_playbooks_yaml = pkgutil.get_data('insights', 'revoked_playbooks.yaml')  # type: bytes
+        revoked_playbooks = yaml.load(revoked_playbooks_yaml)[0]  # type: dict
     except Exception:
-        raise PlaybookVerificationError(message='VERIFICATION FAILED: Error loading revocation list')
+        raise PlaybookVerificationError("Could not load snippet revocation list.")
 
-    # verify the list signature!
     verified, snippet_hash = verify_playbook_snippet(revoked_playbooks)
 
     if not verified:
-        raise PlaybookVerificationError(message='VERIFICATION FAILED: Revocation list signature invalid')
+        raise PlaybookVerificationError("List of revocation signatures is invalid.")
 
-    revocation_list = revoked_playbooks.get('revoked_playbooks', [])
+    revocation_list = revoked_playbooks.get("revoked_playbooks", [])  # type: list[str]
     return revocation_list
 
 
-def verify(playbook, skip_verify=False):
-    """
-    Verify the signed playbook.
+def verify(playbook):
+    """Verify the GPG-signed Ansible playbook.
 
     :param playbook: Unverified playbook.
     :type playbook: list[dict]
-    :returns: "verified" playbook
+    :returns: Verified Ansible playbook.
     :rtype: dict
-    :raises PlaybookVerificationError:
+    :raises PlaybookVerificationError: An error occurred when trying to verify the playbook.
     """
-    logger.info('Playbook Verification has started')
+    logger.info("Verifying Ansible playbook")
 
-    if not skip_verify:
-        if not playbook:
-            raise PlaybookVerificationError(message="PLAYBOOK VERIFICATION FAILURE: Playbook is empty")
+    if not playbook:
+        raise PlaybookVerificationError("Empty playbooks cannot be verified.")
 
-        revocation_list = get_playbook_snippet_revocation_list()
+    revocation_list = get_playbook_snippet_revocation_list()  # type: dict[str, str]
 
-        for snippet in playbook:
-            verified, snippet_hash = verify_playbook_snippet(snippet)
+    for snippet in playbook:
+        name = snippet.get("name", "NAME UNAVAILABLE")
+        verified, snippet_hash = verify_playbook_snippet(snippet)  # type: ..., str
 
-            if not verified:
-                name = snippet.get('name', 'NAME UNAVAILABLE')
-                raise PlaybookVerificationError(message="SIGNATURE NOT VALID: Template [name: {0}] has invalid signature".format(name))
+        if not verified:
+            raise PlaybookVerificationError(message="Template '{0}' has invalid signature".format(name))
 
-            # check if snippet_hash is on the revoked list
-            for revokedItem in revocation_list:
-                if snippet_hash == bytearray.fromhex(revokedItem['hash']):
-                    raise PlaybookVerificationError(message="REVOKED PLAYBOOK: Template is on the revoked list [name: {0}]".format(revokedItem['name']))
+        for revoked_item in revocation_list:
+            if snippet_hash == bytearray.fromhex(revoked_item['hash']):
+                raise PlaybookVerificationError(message="Template '{0}' is on the revoked list".format(name))
 
-    logger.info('All templates successfully validated')
+    logger.info("All templates in the Ansible playbook were verified.")
     return playbook
-
-
-def load_playbook_yaml(playbook):
-    """
-    Load playbook yaml using current yaml library implementation
-        output: playbook yaml
-    """
-    try:
-        playbook_yaml = yaml.load(playbook)
-        return playbook_yaml
-    except Exception:
-        raise PlaybookVerificationError(message="PLAYBOOK VERIFICATION FAILURE: Failed to load playbook yaml because yaml is not valid")
-
-
-def normalize_snippet(snippet):
-    """In Python 2, get rid of any default unicode values.
-
-    :param snippet: The (part of) Ansible playbook.
-    :type snippet: dict | yaml.comments.CommentedMap
-
-    :returns: Snippet with any Unicode text converted to ASCII.
-    :rtype: CommentedMap
-    """
-    result = CommentedMap()
-    for key, value in snippet.iteritems():
-        if isinstance(value, CommentedMap):
-            result[key] = CommentedMap(normalize_snippet(value))
-            continue
-
-        if isinstance(value, CommentedSeq):
-            new_sequence = CommentedSeq()
-            for item in value:
-                if isinstance(item, six.text_type):
-                    new_sequence.append(item.encode('ascii', 'ignore'))
-                    continue
-                if isinstance(item, CommentedMap):
-                    new_sequence.append(normalize_snippet(item))
-                    continue
-                new_sequence.append(item)
-
-            result[key] = new_sequence
-            continue
-
-        if isinstance(value, six.text_type):
-            result[key] = value.encode('ascii', 'ignore')
-            continue
-
-        if isinstance(value, ScalarInt):
-            result[key] = int(value)
-            continue
-
-        result[key] = value
-
-    return result
