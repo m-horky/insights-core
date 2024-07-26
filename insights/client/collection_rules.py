@@ -183,7 +183,10 @@ class InsightsUploadConf(object):
 
         try:
             req = self.conn.get(
-                self.collection_rules_url, headers=({'accept': 'text/plain'}))
+                self.collection_rules_url,
+                headers=({'accept': 'text/plain'}),
+                log_response_text=False,
+            )
 
             if req.status_code == 200:
                 logger.debug("Successfully downloaded collection rules")
@@ -217,8 +220,11 @@ class InsightsUploadConf(object):
                      self.collection_rules_url + ".asc")
 
         headers = ({'accept': 'text/plain'})
-        config_sig = self.conn.get(self.collection_rules_url + '.asc',
-                                   headers=headers)
+        config_sig = self.conn.get(
+            self.collection_rules_url + '.asc',
+            headers=headers,
+            log_response_text = False,
+        )
         if config_sig.status_code == 200:
             logger.debug("Successfully downloaded GPG signature")
             return config_sig.text
@@ -267,7 +273,6 @@ class InsightsUploadConf(object):
 
             conf['file'] = conf_file
             logger.debug("Success reading config")
-            logger.debug(json.dumps(conf))
             self.uploader_json = conf
             return conf
 
