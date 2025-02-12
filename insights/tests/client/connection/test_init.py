@@ -1,4 +1,4 @@
-from insights.client.auto_config import try_auto_configuration
+from insights.client.auto_config import autoconfigure_network
 from insights.client.config import InsightsConfig
 from insights.client.connection import InsightsConnection
 from mock.mock import Mock
@@ -36,6 +36,6 @@ def test_inventory_url_from_phase(
     """
     config = InsightsConfig(**config_kwargs)
     config.load_all()  # Disables legacy upload.
-    try_auto_configuration(config)  # Updates base_url if legacy upload is disabled.
+    autoconfigure_network(config)  # Updates base_url if legacy upload is disabled.
     connection = InsightsConnection(config)
     assert connection.inventory_url == "https://cert-api.access.redhat.com/r/insights/platform/inventory/v1"
