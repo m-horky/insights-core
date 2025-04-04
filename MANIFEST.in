@@ -4,5 +4,6 @@ include insights/VERSION
 include insights/COMMIT
 include insights/RELEASE
 include insights/filters.yaml
+include insights/cert-api.access.redhat.com.pem
 include LICENSE
 graft insights/archive/repository/base_archives

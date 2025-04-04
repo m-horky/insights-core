@@ -3,6 +3,12 @@ Module handling HTTP Requests and Connection Diagnostics
 """
 from __future__ import print_function
 from __future__ import absolute_import
+
+import shutil
+import sys
+import tempfile
+import zipfile
+
 import requests
 import os
 import six
@@ -87,12 +93,9 @@ class InsightsConnection(object):
         # workaround while we support both legacy and plat APIs
         self.cert_verify = self.config.cert_verify
         if self.cert_verify is None:
-            # if self.config.legacy_upload:
-            self.cert_verify = os.path.join(
-                constants.default_conf_dir,
-                'cert-api.access.redhat.com.pem')
-            # else:
-            # self.cert_verify = True
+            ensure_legacy_ca_certificate()
+            self.cert_verify = os.path.join(constants.insights_core_lib_dir, 'cert-api.access.redhat.com.pem')
+            logger.debug("Using packaged legacy API CA certificate.")
         else:
             if isinstance(self.cert_verify, six.string_types):
                 if self.cert_verify.lower() == 'false':
@@ -1181,3 +1184,40 @@ class InsightsConnection(object):
         pc = InsightsUploadConf(self.config)
         _cleaner = cleaner.Cleaner(self.config, pc.get_rm_conf())
         return _deep_clean(cfacts)
+
+
+def ensure_legacy_ca_certificate():
+    """Dump the packaged certificate on filesystem.
+
+    RHEL 6 and 7 use Python 2 which doesn't allow us to read the certificate
+    directly from the egg .zip file. Instead, we have to unpack the zip file
+    manually and dump the file into a writable filesystem path.
+    """
+    certificate_dir = constants.insights_core_lib_dir  # type: str
+    certificate_path = os.path.join(certificate_dir, "cert-api.access.redhat.com.pem")
+    if os.path.exists(certificate_path):
+        logger.debug("CA certificate found at '{path}'.".format(path=certificate_path))
+        return
+
+    logger.debug("Saving legacy CA certificate as '{path}'.".format(path=certificate_path))
+    core_module = sys.modules.get("insights")  # type: "types.ModuleType | None"
+    core_path = os.path.dirname(core_module.__file__)  # type: str
+    egg_path = os.path.dirname(core_path)  # type: str
+
+    if os.path.isdir(egg_path):
+        # During development, you can set EGG= to be a directory instead of an archive
+        egg_certificate_path = os.path.join(egg_path, "insights", "cert-api.access.redhat.com.pem")
+        shutil.copy2(egg_certificate_path, certificate_path)
+    else:
+        # In production/during testing, it is a zip archive.
+        egg_object = zipfile.ZipFile(egg_path, "r")
+        tempdir = tempfile.mkdtemp()
+        egg_object.extract("insights/cert-api.access.redhat.com.pem", tempdir)
+        shutil.move(
+            os.path.join(tempdir, "insights", "cert-api.access.redhat.com.pem"),
+            certificate_path,
+        )
+        try:
+            shutil.rmtree(tempdir)
+        except Exception as exc:
+            logger.debug("Could not remove temporary directory: {}".format(exc))
